@@ -1,0 +1,198 @@
+--- PocketVPN/app/build.gradle
++++ PocketVPN/app/build.gradle
+@@ -16,8 +16,8 @@
+         applicationId 'com.example.pocketvpn'
+         minSdk 26
+         targetSdk 36
+-        versionCode 6
+-        versionName '0.6.0'
++        versionCode 7
++        versionName '0.7.0'
+     }
+ 
+     signingConfigs {
+--- PocketVPN/app/src/main/java/com/example/pocketvpn/MainActivity.java
++++ PocketVPN/app/src/main/java/com/example/pocketvpn/MainActivity.java
+@@ -97,6 +97,7 @@
+     private String pendingConfig;
+     private int selectedIndex = 0;
+     private String serverFilter = "ALL";
++    private boolean scanCloudSetupQr = false;
+     private TextView filterInfo;
+ 
+     private final Runnable statsUpdater = new Runnable() {
+@@ -527,7 +528,13 @@
+         tokenInput.setText(loadCloudToken());
+         box.addView(tokenInput, fullWrap());
+ 
+-        TextView hint = text("Адрес должен начинаться с https://. Код доступа не встраивается в APK и хранится на устройстве в зашифрованном виде.", 11.5f, Color.rgb(126, 151, 170));
++        Button scanSetupButton = button("СКАНИРОВАТЬ QR СЕРВЕРА", Color.rgb(20, 55, 68), Color.rgb(111, 229, 255));
++        scanSetupButton.setOnClickListener(v -> scanQrCloudSetup());
++        LinearLayout.LayoutParams scanSetupLp = buttonParams();
++        scanSetupLp.setMargins(0, dp(8), 0, dp(4));
++        box.addView(scanSetupButton, scanSetupLp);
++
++        TextView hint = text("Адрес должен начинаться с https://. Код доступа не встраивается в APK и хранится на устройстве в зашифрованном виде. Можно отсканировать QR, который показывает установщик PocketVPN Server 0.7.", 11.5f, Color.rgb(126, 151, 170));
+         hint.setPadding(0, dp(7), 0, 0);
+         box.addView(hint, fullWrap());
+ 
+@@ -694,6 +701,9 @@
+                 String location = country + (country.isEmpty() || city.isEmpty() ? "" : " · ") + city;
+                 final Profile p = new Profile(name, cfg);
+                 p.location = location.isEmpty() ? "Облачный сервер" : location;
++                p.cloudApiUrl = baseUrl;
++                p.cloudDeviceId = getOrCreateDeviceId();
++                p.cloudPublicKey = publicKey;
+                 runOnUiThread(() -> {
+                     profiles.add(p);
+                     selectedIndex = profiles.size() - 1;
+@@ -744,6 +754,7 @@
+     }
+ 
+     private void scanQrConfig() {
++        scanCloudSetupQr = false;
+         IntentIntegrator integrator = new IntentIntegrator(this);
+         integrator.setDesiredBarcodeFormats(IntentIntegrator.QR_CODE);
+         integrator.setPrompt("Наведите камеру на QR-код WireGuard");
+@@ -752,6 +763,33 @@
+         integrator.initiateScan();
+     }
+ 
++    private void scanQrCloudSetup() {
++        scanCloudSetupQr = true;
++        IntentIntegrator integrator = new IntentIntegrator(this);
++        integrator.setDesiredBarcodeFormats(IntentIntegrator.QR_CODE);
++        integrator.setPrompt("Сканируйте QR PocketVPN Server");
++        integrator.setBeepEnabled(false);
++        integrator.setOrientationLocked(false);
++        integrator.initiateScan();
++    }
++
++    private void handleCloudSetupQr(String contents) {
++        try {
++            JSONObject o = new JSONObject(contents == null ? "" : contents.trim());
++            if (!"pocketvpn-cloud-v1".equals(o.optString("type", ""))) {
++                throw new IllegalArgumentException("Это не QR PocketVPN Server");
++            }
++            String url = normalizeCloudUrl(requireJson(o, "url"));
++            String token = requireJson(o, "token");
++            if (!url.startsWith("https://")) throw new IllegalArgumentException("Нужен HTTPS-адрес");
++            saveCloudSettings(url, token);
++            Toast.makeText(this, "Сервер привязан", Toast.LENGTH_SHORT).show();
++            fetchCloudServers(url, token);
++        } catch (Exception e) {
++            Toast.makeText(this, "QR сервера: " + e.getMessage(), Toast.LENGTH_LONG).show();
++        }
++    }
++
+     private void handleQrConfig(String contents) {
+         if (contents == null) return;
+         String cfg = contents.trim();
+@@ -890,6 +928,9 @@
+                     p.location = o.optString("location", "Пользовательский сервер");
+                     p.favorite = o.optBoolean("favorite", false);
+                     p.lastLatencyMs = o.has("lastLatencyMs") ? o.optLong("lastLatencyMs", -1) : -1;
++                    p.cloudApiUrl = o.optString("cloudApiUrl", "");
++                    p.cloudDeviceId = o.optString("cloudDeviceId", "");
++                    p.cloudPublicKey = o.optString("cloudPublicKey", "");
+                     profiles.add(p);
+                 }
+             } catch (Exception ignored) { }
+@@ -917,6 +958,9 @@
+                 o.put("location", p.location);
+                 o.put("favorite", p.favorite);
+                 o.put("lastLatencyMs", p.lastLatencyMs);
++                o.put("cloudApiUrl", p.cloudApiUrl);
++                o.put("cloudDeviceId", p.cloudDeviceId);
++                o.put("cloudPublicKey", p.cloudPublicKey);
+                 arr.put(o);
+             }
+             getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+@@ -1006,20 +1050,53 @@
+             Toast.makeText(this, "Сначала отключите VPN", Toast.LENGTH_SHORT).show();
+             return;
+         }
++        boolean cloud = !p.cloudApiUrl.isEmpty() && !p.cloudDeviceId.isEmpty() && !p.cloudPublicKey.isEmpty();
++        String message = cloud ? p.name + "\n\nДоступ этого устройства также будет отозван на сервере." : p.name;
+         new AlertDialog.Builder(this)
+                 .setTitle("Удалить сервер?")
+-                .setMessage(p.name)
++                .setMessage(message)
+                 .setPositiveButton("Удалить", (d, w) -> {
+-                    profiles.remove(selectedIndex);
++                    Profile removed = profiles.remove(selectedIndex);
+                     selectedIndex = clampSelected(selectedIndex - 1);
+                     getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt(KEY_SELECTED, selectedIndex).apply();
+                     saveProfiles();
+                     refreshAll();
++                    if (cloud) revokeCloudPeer(removed);
+                 })
+                 .setNegativeButton("Отмена", null)
+                 .show();
+     }
+ 
++    private void revokeCloudPeer(Profile p) {
++        final String token = loadCloudToken();
++        if (token.isEmpty()) {
++            Toast.makeText(this, "Профиль удалён локально. Код сервера не найден, peer не отозван.", Toast.LENGTH_LONG).show();
++            return;
++        }
++        executor.execute(() -> {
++            HttpURLConnection c = null;
++            try {
++                JSONObject request = new JSONObject();
++                request.put("deviceId", p.cloudDeviceId);
++                request.put("publicKey", p.cloudPublicKey);
++                c = openCloudConnection(p.cloudApiUrl + "/v1/peers/revoke", "POST", token);
++                c.setRequestProperty("Content-Type", "application/json; charset=utf-8");
++                c.setDoOutput(true);
++                try (OutputStream out = c.getOutputStream()) {
++                    out.write(request.toString().getBytes(StandardCharsets.UTF_8));
++                }
++                int code = c.getResponseCode();
++                readHttpBody(c, code);
++                if (code < 200 || code >= 300) throw new IllegalStateException("HTTP " + code);
++                runOnUiThread(() -> Toast.makeText(this, "Серверный peer отозван", Toast.LENGTH_SHORT).show());
++            } catch (Exception e) {
++                runOnUiThread(() -> Toast.makeText(this, "Профиль удалён, но peer на сервере не отозван: " + e.getMessage(), Toast.LENGTH_LONG).show());
++            } finally {
++                if (c != null) c.disconnect();
++            }
++        });
++    }
++
+     private void askImportedMetadata(String defaultName, String cfg) {
+         LinearLayout box = new LinearLayout(this);
+         box.setOrientation(LinearLayout.VERTICAL);
+@@ -1061,7 +1138,11 @@
+ 
+         IntentResult scanResult = IntentIntegrator.parseActivityResult(requestCode, resultCode, data);
+         if (scanResult != null) {
+-            if (scanResult.getContents() != null) handleQrConfig(scanResult.getContents());
++            if (scanResult.getContents() != null) {
++                if (scanCloudSetupQr) handleCloudSetupQr(scanResult.getContents());
++                else handleQrConfig(scanResult.getContents());
++            }
++            scanCloudSetupQr = false;
+             return;
+         }
+ 
+@@ -1181,7 +1262,7 @@
+         try {
+             return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+         } catch (Exception ignored) {
+-            return "0.6.0";
++            return "0.7.0";
+         }
+     }
+ 
+@@ -1291,6 +1372,9 @@
+         String location = "Пользовательский сервер";
+         boolean favorite = false;
+         long lastLatencyMs = -1;
++        String cloudApiUrl = "";
++        String cloudDeviceId = "";
++        String cloudPublicKey = "";
+         Profile(String name, String config) {
+             this.name = name;
+             this.config = config;
