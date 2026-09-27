@@ -3,7 +3,7 @@ name: Build PocketVPN APK
 on:
   push:
     branches:
-      - pocketvpn-build-v06
+      - pocketvpn-build-v07
 
 permissions:
   contents: read
@@ -39,6 +39,9 @@ jobs:
           unzip -q PocketVPN-source-v0.6.zip
           test -f PocketVPN/app/build.gradle
 
+      - name: Apply v0.7 Android patch
+        run: patch -p0 < pocketvpn-build/v07-android.patch
+
       - name: Build debug APK
         working-directory: PocketVPN
         run: gradle --no-daemon --stacktrace :app:assembleDebug
@@ -46,13 +49,13 @@ jobs:
       - name: Prepare APK
         run: |
           mkdir -p output
-          cp PocketVPN/app/build/outputs/apk/debug/app-debug.apk output/PocketVPN-v0.6-debug.apk
-          ls -lh output/PocketVPN-v0.6-debug.apk
+          cp PocketVPN/app/build/outputs/apk/debug/app-debug.apk output/PocketVPN-v0.7-debug.apk
+          ls -lh output/PocketVPN-v0.7-debug.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: PocketVPN-v0.6-debug-apk
-          path: output/PocketVPN-v0.6-debug.apk
+          name: PocketVPN-v0.7-debug-apk
+          path: output/PocketVPN-v0.7-debug.apk
           if-no-files-found: error
           retention-days: 7
