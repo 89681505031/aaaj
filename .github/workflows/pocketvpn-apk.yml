@@ -3,7 +3,7 @@ name: Build PocketVPN APK
 on:
   push:
     branches:
-      - pocketvpn-build-v05
+      - pocketvpn-build-v06
 
 permissions:
   contents: read
